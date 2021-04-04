@@ -10,6 +10,7 @@ var (
 	validSchedulerOptions     = []string{"none", "tasks", "coroutines"}
 	validPrintSizeOptions     = []string{"none", "short", "full"}
 	validPanicStrategyOptions = []string{"print", "trap"}
+	validOptOptions           = []string{"none", "0", "1", "2", "s", "z"}
 )
 
 // Options contains extra options to give to the compiler. These options are
@@ -71,6 +72,10 @@ func (o *Options) Verify() error {
 				o.PanicStrategy,
 				strings.Join(validPanicStrategyOptions, ", "))
 		}
+	}
+
+	if !isInArray(validOptOptions, o.Opt) {
+		return fmt.Errorf("invalid -opt=%s: valid values are %s", o.Opt, strings.Join(validOptOptions, ", "))
 	}
 
 	return nil
