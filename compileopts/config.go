@@ -118,6 +118,27 @@ func (c *Config) Scheduler() string {
 	return "coroutines"
 }
 
+// OptLevels returns the optimization level (0-2), size level (0-2), and inliner
+// threshold as used in the LLVM optimization pipeline.
+func (c *Config) OptLevels() (optLevel, sizeLevel int, inlinerThreshold uint) {
+	switch c.Options.Opt {
+	case "none", "0":
+		return 0, 0, 0 // -O0
+	case "1":
+		return 1, 0, 0 // -O1
+	case "2":
+		return 2, 0, 225 // -O2
+	case "s":
+		return 2, 1, 225 // -Os
+	case "z":
+		return 2, 2, 5 // -Oz, default
+	default:
+		// This is not shown to the user: valid choices are already checked as
+		// part of Options.Verify(). It is here as a sanity check.
+		panic("unknown optimization level: -opt=" + c.Options.Opt)
+	}
+}
+
 // FuncImplementation picks an appropriate func value implementation for the
 // target.
 func (c *Config) FuncImplementation() string {
@@ -163,7 +184,7 @@ func (c *Config) AutomaticStackSize() bool {
 // CFlags returns the flags to pass to the C compiler. This is necessary for CGo
 // preprocessing.
 func (c *Config) CFlags() []string {
-	cflags := append([]string{}, c.Options.CFlags...)
+	var cflags []string
 	for _, flag := range c.Target.CFlags {
 		cflags = append(cflags, strings.ReplaceAll(flag, "{root}", goenv.Get("TINYGOROOT")))
 	}
@@ -184,7 +205,7 @@ func (c *Config) CFlags() []string {
 func (c *Config) LDFlags() []string {
 	root := goenv.Get("TINYGOROOT")
 	// Merge and adjust LDFlags.
-	ldflags := append([]string{}, c.Options.LDFlags...)
+	var ldflags []string
 	for _, flag := range c.Target.LDFlags {
 		ldflags = append(ldflags, strings.ReplaceAll(flag, "{root}", root))
 	}

@@ -62,6 +62,7 @@ func TestCompiler(t *testing.T) {
 		"string.go",
 		"float.go",
 		"interface.go",
+		"func.go",
 	}
 
 	for _, testCase := range tests {
@@ -84,9 +85,14 @@ func TestCompiler(t *testing.T) {
 			mod, errs := CompilePackage(testCase, pkg, program.Package(pkg.Pkg), machine, compilerConfig, false)
 			if errs != nil {
 				for _, err := range errs {
-					t.Log("error:", err)
+					t.Error(err)
 				}
 				return
+			}
+
+			err = llvm.VerifyModule(mod, llvm.PrintMessageAction)
+			if err != nil {
+				t.Error(err)
 			}
 
 			// Optimize IR a little.

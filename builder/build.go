@@ -52,14 +52,17 @@ type BuildResult struct {
 // key, avoiding the need for recompiling all dependencies when only the
 // implementation of an imported package changes.
 type packageAction struct {
-	ImportPath      string
-	CompilerVersion int // compiler.Version
-	InterpVersion   int // interp.Version
-	LLVMVersion     string
-	Config          *compiler.Config
-	CFlags          []string
-	FileHashes      map[string]string // hash of every file that's part of the package
-	Imports         map[string]string // map from imported package to action ID hash
+	ImportPath       string
+	CompilerVersion  int // compiler.Version
+	InterpVersion    int // interp.Version
+	LLVMVersion      string
+	Config           *compiler.Config
+	CFlags           []string
+	FileHashes       map[string]string // hash of every file that's part of the package
+	Imports          map[string]string // map from imported package to action ID hash
+	OptLevel         int               // LLVM optimization level (0-3)
+	SizeLevel        int               // LLVM optimization for size level (0-2)
+	UndefinedGlobals []string          // globals that are left as external globals (no initializer)
 }
 
 // Build performs a single package to executable Go build. It takes in a package
@@ -127,20 +130,30 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 	var packageJobs []*compileJob
 	packageBitcodePaths := make(map[string]string)
 	packageActionIDs := make(map[string]string)
+	optLevel, sizeLevel, _ := config.OptLevels()
 	for _, pkg := range lprogram.Sorted() {
 		pkg := pkg // necessary to avoid a race condition
+
+		var undefinedGlobals []string
+		for name := range config.Options.GlobalValues[pkg.Pkg.Path()] {
+			undefinedGlobals = append(undefinedGlobals, name)
+		}
+		sort.Strings(undefinedGlobals)
 
 		// Create a cache key: a hash from the action ID below that contains all
 		// the parameters for the build.
 		actionID := packageAction{
-			ImportPath:      pkg.ImportPath,
-			CompilerVersion: compiler.Version,
-			InterpVersion:   interp.Version,
-			LLVMVersion:     llvm.Version,
-			Config:          compilerConfig,
-			CFlags:          pkg.CFlags,
-			FileHashes:      make(map[string]string, len(pkg.FileHashes)),
-			Imports:         make(map[string]string, len(pkg.Pkg.Imports())),
+			ImportPath:       pkg.ImportPath,
+			CompilerVersion:  compiler.Version,
+			InterpVersion:    interp.Version,
+			LLVMVersion:      llvm.Version,
+			Config:           compilerConfig,
+			CFlags:           pkg.CFlags,
+			FileHashes:       make(map[string]string, len(pkg.FileHashes)),
+			Imports:          make(map[string]string, len(pkg.Pkg.Imports())),
+			OptLevel:         optLevel,
+			SizeLevel:        sizeLevel,
+			UndefinedGlobals: undefinedGlobals,
 		}
 		for filePath, hash := range pkg.FileHashes {
 			actionID.FileHashes[filePath] = hex.EncodeToString(hash)
@@ -191,6 +204,25 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 					return errors.New("verification error after compiling package " + pkg.ImportPath)
 				}
 
+				// Erase all globals that are part of the undefinedGlobals list.
+				// This list comes from the -ldflags="-X pkg.foo=val" option.
+				// Instead of setting the value directly in the AST (which would
+				// mean the value, which may be a secret, is stored in the build
+				// cache), the global itself is left external (undefined) and is
+				// only set at the end of the compilation.
+				for _, name := range undefinedGlobals {
+					globalName := pkg.Pkg.Path() + "." + name
+					global := mod.NamedGlobal(globalName)
+					if global.IsNil() {
+						return errors.New("global not found: " + globalName)
+					}
+					name := global.Name()
+					newGlobal := llvm.AddGlobal(mod, global.Type().ElementType(), name+".tmp")
+					global.ReplaceAllUsesWith(newGlobal)
+					global.EraseFromParentAsGlobal()
+					newGlobal.SetName(name)
+				}
+
 				// Try to interpret package initializers at compile time.
 				// It may only be possible to do this partially, in which case
 				// it is completed after all IR files are linked.
@@ -205,6 +237,38 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 				if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
 					return errors.New("verification error after interpreting " + pkgInit.Name())
 				}
+
+				if sizeLevel >= 2 {
+					// Set the "optsize" attribute to make slightly smaller
+					// binaries at the cost of some performance.
+					kind := llvm.AttributeKindID("optsize")
+					attr := mod.Context().CreateEnumAttribute(kind, 0)
+					for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+						fn.AddFunctionAttr(attr)
+					}
+				}
+
+				// Run function passes for each function in the module.
+				// These passes are intended to be run on each function right
+				// after they're created to reduce IR size (and maybe also for
+				// cache locality to improve performance), but for now they're
+				// run here for each function in turn. Maybe this can be
+				// improved in the future.
+				builder := llvm.NewPassManagerBuilder()
+				defer builder.Dispose()
+				builder.SetOptLevel(optLevel)
+				builder.SetSizeLevel(sizeLevel)
+				funcPasses := llvm.NewFunctionPassManagerForModule(mod)
+				defer funcPasses.Dispose()
+				builder.PopulateFunc(funcPasses)
+				funcPasses.InitializeFunc()
+				for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+					if fn.IsDeclaration() {
+						continue
+					}
+					funcPasses.RunFunc(fn)
+				}
+				funcPasses.FinalizeFunc()
 
 				// Serialize the LLVM module as a bitcode file.
 				// Write to a temporary path that is renamed to the destination
@@ -430,7 +494,7 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 		job := &compileJob{
 			description: "compile extra file " + path,
 			run: func(job *compileJob) error {
-				result, err := compileAndCacheCFile(abspath, dir, config)
+				result, err := compileAndCacheCFile(abspath, dir, config.CFlags(), config)
 				job.result = result
 				return err
 			},
@@ -443,12 +507,13 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 	// TODO: do this as part of building the package to be able to link the
 	// bitcode files together.
 	for _, pkg := range lprogram.Sorted() {
+		pkg := pkg
 		for _, filename := range pkg.CFiles {
 			abspath := filepath.Join(pkg.Dir, filename)
 			job := &compileJob{
 				description: "compile CGo file " + abspath,
 				run: func(job *compileJob) error {
-					result, err := compileAndCacheCFile(abspath, dir, config)
+					result, err := compileAndCacheCFile(abspath, dir, pkg.CFlags, config)
 					job.result = result
 					return err
 				},
@@ -602,6 +667,12 @@ func optimizeProgram(mod llvm.Module, config *compileopts.Config) error {
 		transform.ApplyFunctionSections(mod) // -ffunction-sections
 	}
 
+	// Insert values from -ldflags="-X ..." into the IR.
+	err = setGlobalValues(mod, config.Options.GlobalValues)
+	if err != nil {
+		return err
+	}
+
 	// Browsers cannot handle external functions that have type i64 because it
 	// cannot be represented exactly in JavaScript (JS only has doubles). To
 	// keep functions interoperable, pass int64 types as pointers to
@@ -616,21 +687,8 @@ func optimizeProgram(mod llvm.Module, config *compileopts.Config) error {
 
 	// Optimization levels here are roughly the same as Clang, but probably not
 	// exactly.
-	var errs []error
-	switch config.Options.Opt {
-	case "none", "0":
-		errs = transform.Optimize(mod, config, 0, 0, 0) // -O0
-	case "1":
-		errs = transform.Optimize(mod, config, 1, 0, 0) // -O1
-	case "2":
-		errs = transform.Optimize(mod, config, 2, 0, 225) // -O2
-	case "s":
-		errs = transform.Optimize(mod, config, 2, 1, 225) // -Os
-	case "z":
-		errs = transform.Optimize(mod, config, 2, 2, 5) // -Oz, default
-	default:
-		return errors.New("unknown optimization level: -opt=" + config.Options.Opt)
-	}
+	optLevel, sizeLevel, inlinerThreshold := config.OptLevels()
+	errs := transform.Optimize(mod, config, optLevel, sizeLevel, inlinerThreshold)
 	if len(errs) > 0 {
 		return newMultiError(errs)
 	}
@@ -649,6 +707,71 @@ func optimizeProgram(mod llvm.Module, config *compileopts.Config) error {
 		transform.DisableTailCalls(mod)
 	}
 
+	return nil
+}
+
+// setGlobalValues sets the global values from the -ldflags="-X ..." compiler
+// option in the given module. An error may be returned if the global is not of
+// the expected type.
+func setGlobalValues(mod llvm.Module, globals map[string]map[string]string) error {
+	var pkgPaths []string
+	for pkgPath := range globals {
+		pkgPaths = append(pkgPaths, pkgPath)
+	}
+	sort.Strings(pkgPaths)
+	for _, pkgPath := range pkgPaths {
+		pkg := globals[pkgPath]
+		var names []string
+		for name := range pkg {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			value := pkg[name]
+			globalName := pkgPath + "." + name
+			global := mod.NamedGlobal(globalName)
+			if global.IsNil() || !global.Initializer().IsNil() {
+				// The global either does not exist (optimized away?) or has
+				// some value, in which case it has already been initialized at
+				// package init time.
+				continue
+			}
+
+			// A strin is a {ptr, len} pair. We need these types to build the
+			// initializer.
+			initializerType := global.Type().ElementType()
+			if initializerType.TypeKind() != llvm.StructTypeKind || initializerType.StructName() == "" {
+				return fmt.Errorf("%s: not a string", globalName)
+			}
+			elementTypes := initializerType.StructElementTypes()
+			if len(elementTypes) != 2 {
+				return fmt.Errorf("%s: not a string", globalName)
+			}
+
+			// Create a buffer for the string contents.
+			bufInitializer := mod.Context().ConstString(value, false)
+			buf := llvm.AddGlobal(mod, bufInitializer.Type(), ".string")
+			buf.SetInitializer(bufInitializer)
+			buf.SetAlignment(1)
+			buf.SetUnnamedAddr(true)
+			buf.SetLinkage(llvm.PrivateLinkage)
+
+			// Create the string value, which is a {ptr, len} pair.
+			zero := llvm.ConstInt(mod.Context().Int32Type(), 0, false)
+			ptr := llvm.ConstGEP(buf, []llvm.Value{zero, zero})
+			if ptr.Type() != elementTypes[0] {
+				return fmt.Errorf("%s: not a string", globalName)
+			}
+			length := llvm.ConstInt(elementTypes[1], uint64(len(value)), false)
+			initializer := llvm.ConstNamedStruct(initializerType, []llvm.Value{
+				ptr,
+				length,
+			})
+
+			// Set the initializer. No initializer should be set at this point.
+			global.SetInitializer(initializer)
+		}
+	}
 	return nil
 }
 

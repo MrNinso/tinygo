@@ -177,6 +177,11 @@ commands:
       - run:
           name: "Test TinyGo"
           command: make ASSERT=1 test
+          environment:
+            # Note: -p=2 limits parallelism to two jobs at a time, which is
+            # necessary to keep memory consumption down and avoid OOM (for a
+            # 2CPU/4GB executor).
+            GOFLAGS: -p=2
       - save_cache:
           key: go-cache-v2-{{ checksum "go.mod" }}-{{ .Environment.CIRCLE_BUILD_NUM }}
           paths:

@@ -53,15 +53,14 @@ func LowerFuncValues(mod llvm.Module) {
 	uintptrType := ctx.IntType(llvm.NewTargetData(mod.DataLayout()).PointerSize() * 8)
 
 	// Find all func values used in the program with their signatures.
-	funcValueWithSignaturePtr := llvm.PointerType(mod.GetTypeByName("runtime.funcValueWithSignature"), 0)
 	signatures := map[string]*funcSignatureInfo{}
 	for global := mod.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
 		var sig, funcVal llvm.Value
 		switch {
-		case global.Type() == funcValueWithSignaturePtr:
+		case strings.HasSuffix(global.Name(), "$withSignature"):
 			sig = llvm.ConstExtractValue(global.Initializer(), []uint32{1})
 			funcVal = global
-		case strings.HasPrefix(global.Name(), "reflect/types.type:func:{"):
+		case strings.HasPrefix(global.Name(), "reflect/types.funcid:func:{"):
 			sig = global
 		default:
 			continue
@@ -118,12 +117,18 @@ func LowerFuncValues(mod llvm.Module) {
 						continue
 					}
 					for _, funcValueWithSignatureGlobal := range getUses(funcValueWithSignatureConstant) {
+						id := llvm.ConstInt(uintptrType, uint64(fn.id), false)
 						for _, use := range getUses(funcValueWithSignatureGlobal) {
-							if ptrtoint.IsAConstantExpr().IsNil() || ptrtoint.Opcode() != llvm.PtrToInt {
-								panic("expected const ptrtoint")
+							// Try to replace uses directly: most will be
+							// ptrtoint instructions.
+							if !use.IsAConstantExpr().IsNil() && use.Opcode() == llvm.PtrToInt {
+								use.ReplaceAllUsesWith(id)
 							}
-							use.ReplaceAllUsesWith(llvm.ConstInt(uintptrType, uint64(fn.id), false))
 						}
+						// Remaining uses can be replaced using a ptrtoint.
+						// In my quick testing, this doesn't really happen in
+						// practice.
+						funcValueWithSignatureGlobal.ReplaceAllUsesWith(llvm.ConstIntToPtr(id, funcValueWithSignatureGlobal.Type()))
 					}
 				}
 			}
@@ -196,6 +201,12 @@ func LowerFuncValues(mod llvm.Module) {
 			}
 			getFuncPtrCall.EraseFromParentAsInstruction()
 		}
+
+		// Clean up all globals used before func lowering.
+		for _, obj := range info.funcValueWithSignatures {
+			obj.EraseFromParentAsGlobal()
+		}
+		info.sig.EraseFromParentAsGlobal()
 	}
 }
 

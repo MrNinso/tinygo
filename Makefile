@@ -341,8 +341,6 @@ smoketest:
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=feather-m4          examples/pwm
 	@$(MD5SUM) test.hex
-	$(TINYGO) build -size short -o test.hex -target=pyportal            examples/pwm
-	@$(MD5SUM) test.hex
 ifneq ($(STM32), 0)
 	$(TINYGO) build -size short -o test.hex -target=bluepill            examples/blinky1
 	@$(MD5SUM) test.hex
@@ -353,6 +351,8 @@ ifneq ($(STM32), 0)
 	$(TINYGO) build -size short -o test.hex -target=nucleo-f103rb       examples/blinky1
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=nucleo-f722ze       examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=nucleo-l031k6       examples/blinky1
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=nucleo-l432kc       examples/blinky1
 	@$(MD5SUM) test.hex
@@ -373,6 +373,8 @@ ifneq ($(AVR), 0)
 	$(TINYGO) build -size short -o test.hex -target=arduino             examples/pwm
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=arduino -scheduler=tasks  examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=arduino-mega1280             examples/blinky1
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=arduino-nano        examples/blinky1
 	@$(MD5SUM) test.hex

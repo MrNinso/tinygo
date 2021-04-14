@@ -50,23 +50,13 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		}
 	}
 
-	// Run function passes for each function.
-	funcPasses := llvm.NewFunctionPassManagerForModule(mod)
-	defer funcPasses.Dispose()
-	builder.PopulateFunc(funcPasses)
-	funcPasses.InitializeFunc()
-	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-		funcPasses.RunFunc(fn)
-	}
-	funcPasses.FinalizeFunc()
-
 	if optLevel > 0 {
 		// Run some preparatory passes for the Go optimizer.
 		goPasses := llvm.NewPassManager()
 		defer goPasses.Dispose()
 		goPasses.AddGlobalDCEPass()
 		goPasses.AddGlobalOptimizerPass()
-		goPasses.AddConstantPropagationPass()
+		goPasses.AddIPSCCPPass()
 		goPasses.AddAggressiveDCEPass()
 		goPasses.AddFunctionAttrsPass()
 		goPasses.Run(mod)
@@ -76,12 +66,12 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		OptimizeStringToBytes(mod)
 		OptimizeReflectImplements(mod)
 		OptimizeAllocs(mod)
-		err := LowerInterfaces(mod)
+		err := LowerInterfaces(mod, sizeLevel)
 		if err != nil {
 			return []error{err}
 		}
 
-		errs := LowerInterrupts(mod)
+		errs := LowerInterrupts(mod, sizeLevel)
 		if len(errs) > 0 {
 			return errs
 		}
@@ -102,14 +92,14 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 
 	} else {
 		// Must be run at any optimization level.
-		err := LowerInterfaces(mod)
+		err := LowerInterfaces(mod, sizeLevel)
 		if err != nil {
 			return []error{err}
 		}
 		if config.FuncImplementation() == "switch" {
 			LowerFuncValues(mod)
 		}
-		errs := LowerInterrupts(mod)
+		errs := LowerInterrupts(mod, sizeLevel)
 		if len(errs) > 0 {
 			return errs
 		}
@@ -153,16 +143,6 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		return []error{errors.New("optimizations caused a verification failure")}
 	}
 
-	if sizeLevel >= 2 {
-		// Set the "optsize" attribute to make slightly smaller binaries at the
-		// cost of some performance.
-		kind := llvm.AttributeKindID("optsize")
-		attr := mod.Context().CreateEnumAttribute(kind, 0)
-		for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-			fn.AddFunctionAttr(attr)
-		}
-	}
-
 	// After TinyGo-specific transforms have finished, undo exporting these functions.
 	for _, name := range getFunctionsUsedInTransforms(config) {
 		fn := mod.NamedFunction(name)
@@ -174,6 +154,10 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 
 	// Run function passes again, because without it, llvm.coro.size.i32()
 	// doesn't get lowered.
+	funcPasses := llvm.NewFunctionPassManagerForModule(mod)
+	defer funcPasses.Dispose()
+	builder.PopulateFunc(funcPasses)
+	funcPasses.InitializeFunc()
 	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
 		funcPasses.RunFunc(fn)
 	}

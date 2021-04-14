@@ -133,6 +133,7 @@ func (itf *interfaceInfo) id() string {
 // should be seen as a regular function call (see LowerInterfaces).
 type lowerInterfacesPass struct {
 	mod         llvm.Module
+	sizeLevel   int // LLVM optimization size level, 1 means -opt=s and 2 means -opt=z
 	builder     llvm.Builder
 	ctx         llvm.Context
 	uintptrType llvm.Type
@@ -145,9 +146,10 @@ type lowerInterfacesPass struct {
 // emitted by the compiler as higher-level intrinsics. They need some lowering
 // before LLVM can work on them. This is done so that a few cleanup passes can
 // run before assigning the final type codes.
-func LowerInterfaces(mod llvm.Module) error {
+func LowerInterfaces(mod llvm.Module, sizeLevel int) error {
 	p := &lowerInterfacesPass{
 		mod:         mod,
+		sizeLevel:   sizeLevel,
 		builder:     mod.Context().NewBuilder(),
 		ctx:         mod.Context(),
 		uintptrType: mod.Context().IntType(llvm.NewTargetData(mod.DataLayout()).PointerSize() * 8),
@@ -161,16 +163,13 @@ func LowerInterfaces(mod llvm.Module) error {
 // run runs the pass itself.
 func (p *lowerInterfacesPass) run() error {
 	// Collect all type codes.
-	typecodeID := p.mod.GetTypeByName("runtime.typecodeID")
-	typecodeIDPtr := llvm.PointerType(typecodeID, 0)
 	var typecodeIDs []llvm.Value
 	for global := p.mod.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
-		switch global.Type() {
-		case typecodeIDPtr:
+		if strings.HasPrefix(global.Name(), "reflect/types.type:") {
 			// Retrieve Go type information based on an opaque global variable.
 			// Only the name of the global is relevant, the object itself is
 			// discarded afterwards.
-			name := global.Name()
+			name := strings.TrimPrefix(global.Name(), "reflect/types.type:")
 			if _, ok := p.types[name]; !ok {
 				typecodeIDs = append(typecodeIDs, global)
 				t := &typeInfo{
@@ -194,8 +193,7 @@ func (p *lowerInterfacesPass) run() error {
 	typeAssertUses := getUses(typeAssert)
 	for _, use := range typeAssertUses {
 		typecode := use.Operand(1)
-		name := typecode.Name()            // name with $id suffix
-		name = name[:len(name)-len("$id")] // remove $id suffix
+		name := strings.TrimPrefix(typecode.Name(), "reflect/types.typeid:")
 		if t, ok := p.types[name]; ok {
 			t.countTypeAsserts++
 		}
@@ -358,7 +356,7 @@ func (p *lowerInterfacesPass) run() error {
 			if use.IsAConstantExpr().IsNil() {
 				continue
 			}
-			t := p.types[global.Name()]
+			t := p.types[strings.TrimPrefix(global.Name(), "reflect/types.type:")]
 			typecode := llvm.ConstInt(p.uintptrType, t.num, false)
 			switch use.Opcode() {
 			case llvm.PtrToInt:
@@ -379,8 +377,7 @@ func (p *lowerInterfacesPass) run() error {
 	llvmFalse := llvm.ConstInt(p.ctx.Int1Type(), 0, false)
 	for _, use := range typeAssertUses {
 		actualType := use.Operand(0)
-		name := use.Operand(1).Name()      // name with $id suffix
-		name = name[:len(name)-len("$id")] // remove $id suffix
+		name := strings.TrimPrefix(use.Operand(1).Name(), "reflect/types.typeid:")
 		if t, ok := p.types[name]; ok {
 			// The type exists in the program, so lower to a regular integer
 			// comparison.
@@ -421,13 +418,12 @@ func (p *lowerInterfacesPass) run() error {
 
 	// Remove most objects created for interface and reflect lowering.
 	// Unnecessary, but cleans up the IR for inspection and testing.
-	zeroTypeCode := llvm.ConstNull(typecodeID)
 	for _, typ := range p.types {
 		// Only some typecodes have an initializer.
 		initializer := typ.typecode.Initializer()
 		if !initializer.IsNil() {
 			references := llvm.ConstExtractValue(initializer, []uint32{0})
-			typ.typecode.SetInitializer(zeroTypeCode)
+			typ.typecode.SetInitializer(llvm.ConstNull(initializer.Type()))
 			if strings.HasPrefix(typ.name, "reflect/types.type:struct:") {
 				// Structs have a 'references' field that is not a typecode but
 				// a pointer to a runtime.structField array and therefore a
@@ -594,6 +590,9 @@ func (p *lowerInterfacesPass) createInterfaceImplementsFunc(itf *interfaceInfo) 
 	fn := itf.assertFunc
 	fn.SetLinkage(llvm.InternalLinkage)
 	fn.SetUnnamedAddr(true)
+	if p.sizeLevel >= 2 {
+		fn.AddFunctionAttr(p.ctx.CreateEnumAttribute(llvm.AttributeKindID("optsize"), 0))
+	}
 
 	// TODO: debug info
 
@@ -653,6 +652,9 @@ func (p *lowerInterfacesPass) createInterfaceMethodFunc(itf *interfaceInfo, sign
 	fn := itf.methodFuncs[signature]
 	fn.SetLinkage(llvm.InternalLinkage)
 	fn.SetUnnamedAddr(true)
+	if p.sizeLevel >= 2 {
+		fn.AddFunctionAttr(p.ctx.CreateEnumAttribute(llvm.AttributeKindID("optsize"), 0))
+	}
 
 	// TODO: debug info
 

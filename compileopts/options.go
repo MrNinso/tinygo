@@ -10,6 +10,7 @@ var (
 	validSchedulerOptions     = []string{"none", "tasks", "coroutines"}
 	validPrintSizeOptions     = []string{"none", "short", "full"}
 	validPanicStrategyOptions = []string{"print", "trap"}
+	validOptOptions           = []string{"none", "0", "1", "2", "s", "z"}
 )
 
 // Options contains extra options to give to the compiler. These options are
@@ -27,10 +28,9 @@ type Options struct {
 	Debug         bool
 	PrintSizes    string
 	PrintStacks   bool
-	CFlags        []string
-	LDFlags       []string
 	Tags          string
 	WasmAbi       string
+	GlobalValues  map[string]map[string]string // map[pkgpath]map[varname]value
 	TestConfig    TestConfig
 	Programmer    string
 }
@@ -70,6 +70,12 @@ func (o *Options) Verify() error {
 			return fmt.Errorf(`invalid panic option '%s': valid values are %s`,
 				o.PanicStrategy,
 				strings.Join(validPanicStrategyOptions, ", "))
+		}
+	}
+
+	if o.Opt != "" {
+		if !isInArray(validOptOptions, o.Opt) {
+			return fmt.Errorf("invalid -opt=%s: valid values are %s", o.Opt, strings.Join(validOptOptions, ", "))
 		}
 	}
 
