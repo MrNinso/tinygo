@@ -43,13 +43,14 @@ See the [getting started instructions](https://tinygo.org/getting-started/) for 
 
 You can compile TinyGo programs for microcontrollers, WebAssembly and Linux.
 
-The following 55 microcontroller boards are currently supported:
+The following 57 microcontroller boards are currently supported:
 
 * [Adafruit Circuit Playground Bluefruit](https://www.adafruit.com/product/4333)
 * [Adafruit Circuit Playground Express](https://www.adafruit.com/product/3333)
 * [Adafruit CLUE](https://www.adafruit.com/product/4500)
 * [Adafruit Feather M0](https://www.adafruit.com/product/2772)
 * [Adafruit Feather M4](https://www.adafruit.com/product/3857)
+* [Adafruit Feather M4 CAN](https://www.adafruit.com/product/4759)
 * [Adafruit Feather nRF52840 Express](https://www.adafruit.com/product/4062)
 * [Adafruit Feather STM32F405 Express](https://www.adafruit.com/product/4382)
 * [Adafruit ItsyBitsy M0](https://www.adafruit.com/product/3727)
@@ -77,6 +78,7 @@ The following 55 microcontroller boards are currently supported:
 * [Game Boy Advance](https://en.wikipedia.org/wiki/Game_Boy_Advance)
 * [Makerdiary nRF52840-MDK](https://wiki.makerdiary.com/nrf52840-mdk/)
 * [Makerdiary nRF52840-MDK USB Dongle](https://wiki.makerdiary.com/nrf52840-mdk-usb-dongle/)
+* [Microchip SAM E54 Xplained Pro](https://www.microchip.com/developmenttools/productdetails/atsame54-xpro)
 * [nice!nano](https://docs.nicekeyboards.com/#/nice!nano/)
 * [Nintendo Switch](https://www.nintendo.com/switch/)
 * [Nordic Semiconductor PCA10031](https://www.nordicsemi.com/eng/Products/nRF51-Dongle)
